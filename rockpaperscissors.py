@@ -10,11 +10,15 @@ def getComputerMove():
     return  validMove[random.randint(0,2)]
 
 def getPlayerMove():
-    playerMove = input("Choose your Move [Rock,Paper,Scissors] or Quit ")
-    if playerMove in validMove or playerMove == 'Quit':
-        return playerMove
-    else:
-       return getPlayerMove()
+    """Prompt the player for their move and validate the response."""
+    while True:
+        playerMove = input("Choose your Move [Rock,Paper,Scissors] or Quit ")
+        playerMove = playerMove.strip().capitalize()
+
+        if playerMove in validMove or playerMove == 'Quit':
+            return playerMove
+
+        print("Invalid move, please try again.")
 
 def gameLoop():
     while(True):
