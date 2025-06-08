@@ -1,5 +1,7 @@
 import random
-potentialKeys = 'abcdefghijklmnopqrstuvwxyz124567890@;#~/><'
+# Include all digits 0 through 9 so generated passwords can use any decimal
+# digit. The original string omitted the digit '3'.
+potentialKeys = 'abcdefghijklmnopqrstuvwxyz1234567890@;#~/><'
 
 def getLength():
     try:
