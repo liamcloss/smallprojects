@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TikTok Content Factory</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">CONTENT FACTORY</p>
+        <h1>Make today's post.</h1>
+        <p class="sub">Generate three strong six-slide drafts. Edit one. Render only the one you want.</p>
+      </div>
+      <div class="status {{ 'ok' if has_api_key else 'warn' }}">
+        <span></span>
+        {{ 'Live API ready' if has_api_key else 'Mock mode until API key is on this host' }}
+      </div>
+    </header>
+
+    <section class="panel" id="generator-panel">
+      <form id="concept-form">
+        <label for="trends">What is happening today? <small>Optional</small></label>
+        <textarea id="trends" rows="3" placeholder="One hint per line, e.g. Sunday evening&#10;Back-to-school week&#10;Wet bank holiday"></textarea>
+
+        <div class="options">
+          <label class="toggle"><input id="web-context" type="checkbox" checked> Use current UK web context</label>
+          <label class="toggle"><input id="mock" type="checkbox" {% if mock_default %}checked{% endif %}> Mock mode</label>
+        </div>
+
+        <button class="primary" type="submit" id="generate-button">Generate 3 drafts</button>
+      </form>
+      <p id="status-text" class="message" aria-live="polite"></p>
+    </section>
+
+    <section id="recent-section" class="hidden">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">RECENT</p>
+          <h2>Drafts already waiting.</h2>
+        </div>
+      </div>
+      <div id="recent-batches" class="recent-list"></div>
+    </section>
+
+    <section id="concepts-section" class="hidden">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">SHORTLIST</p>
+          <h2>Pick the one worth making.</h2>
+        </div>
+        <span id="batch-label" class="pill"></span>
+      </div>
+      <div id="context-sources" class="context-sources"></div>
+      <div id="concept-cards" class="cards"></div>
+    </section>
+
+    <section id="editor-section" class="hidden panel editor">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">EDIT</p>
+          <h2 id="editor-title">Tighten the six slides.</h2>
+        </div>
+        <button class="ghost" type="button" id="close-editor">Close</button>
+      </div>
+      <div id="slides-editor" class="slides-editor"></div>
+
+      <label for="caption">Caption</label>
+      <textarea id="caption" rows="2"></textarea>
+
+      <label for="hashtags">Hashtags <small>comma separated</small></label>
+      <input id="hashtags" type="text">
+
+      <div class="two-col">
+        <div>
+          <label for="music-mood">Music mood</label>
+          <input id="music-mood" type="text">
+        </div>
+        <div>
+          <label for="music-terms">TikTok music searches <small>comma separated</small></label>
+          <input id="music-terms" type="text">
+        </div>
+      </div>
+
+      <button class="primary" id="render-button" type="button">Generate the 6 images</button>
+      <p id="render-status" class="message" aria-live="polite"></p>
+    </section>
+
+    <section id="result-section" class="hidden">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">READY</p>
+          <h2>Post package.</h2>
+          <p class="sub">Add a current TikTok-native sound, then publish.</p>
+        </div>
+      </div>
+      <div id="result-images" class="image-grid"></div>
+      <div class="panel copy-panel">
+        <p class="eyebrow">CAPTION</p>
+        <p id="result-caption"></p>
+        <p class="eyebrow">MUSIC SEARCH</p>
+        <p id="result-music"></p>
+      </div>
+    </section>
+  </main>
+
+<script>
+let currentBatch = null;
+let currentItem = null;
+
+const $ = (id) => document.getElementById(id);
+
+function setBusy(button, busy, busyText, normalText) {
+  button.disabled = busy;
+  button.textContent = busy ? busyText : normalText;
+}
+
+function splitLines(value) {
+  return value.split(/\n+/).map(v => v.trim()).filter(Boolean);
+}
+
+async function loadRecent() {
+  try {
+    const response = await fetch('/drafts?limit=5');
+    if (!response.ok) return;
+    const batches = await response.json();
+    if (!batches.length) return;
+    $('recent-batches').innerHTML = '';
+    batches.forEach(batch => {
+      const first = batch.items[0];
+      const row = document.createElement('div');
+      row.className = 'recent-row';
+      const mode = batch.mock ? 'Mock' : 'Live';
+      const origin = batch.origin === 'scheduled' ? 'Scheduled' : 'Manual';
+      row.innerHTML = `
+        <button type="button" class="recent-open">
+          <span><strong>${escapeHtml(batch.context.day_name)} ${escapeHtml(batch.context.run_date)}</strong><small>${escapeHtml(first?.concept?.hook || 'Draft batch')}</small></span>
+          <span class="recent-meta">${escapeHtml(origin)} · ${escapeHtml(mode)} · Open →</span>
+        </button>
+        <button type="button" class="archive-button" aria-label="Archive this draft batch">Archive</button>`;
+      row.querySelector('.recent-open').addEventListener('click', () => showConcepts(batch));
+      row.querySelector('.archive-button').addEventListener('click', async () => {
+        const response = await fetch(`/drafts/${encodeURIComponent(batch.batch_id)}/archive`, {method:'POST'});
+        if (response.ok) {
+          row.remove();
+          if (!$('recent-batches').children.length) $('recent-section').classList.add('hidden');
+        }
+      });
+      $('recent-batches').appendChild(row);
+    });
+    $('recent-section').classList.remove('hidden');
+  } catch (_) {}
+}
+
+function showConcepts(batch) {
+  currentBatch = batch;
+  $('batch-label').textContent = `${batch.context.day_name} · ${batch.context.run_date} · ${batch.origin === 'scheduled' ? 'Scheduled' : 'Manual'} · ${batch.mock ? 'Mock' : 'Live'}`;
+  const sources = batch.context.sources || [];
+  $('context-sources').innerHTML = sources.map(source => {
+    const label = `${source.source_type.replaceAll('_', ' ')}: ${source.title}`;
+    if (source.url) {
+      return `<a href="${escapeHtml(source.url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+    }
+    return `<span>${escapeHtml(label)}</span>`;
+  }).join('');
+  $('concept-cards').innerHTML = '';
+  batch.items.forEach(item => {
+    const card = document.createElement('article');
+    card.className = 'concept-card';
+    card.innerHTML = `
+      <div class="card-meta"><span>#${item.rank}</span><span>${escapeHtml(item.concept.topic)}</span><span>${escapeHtml(item.concept.emotion)}</span></div>
+      <h3>${escapeHtml(item.concept.hook)}</h3>
+      <p>${escapeHtml(item.concept.angle)}</p>
+      <div class="score-row"><strong>${Number(item.score).toFixed(1)}</strong><span>${escapeHtml(item.rationale)}</span></div>
+      <button type="button" class="secondary">Open 6-slide draft</button>`;
+    card.querySelector('button').addEventListener('click', () => openEditor(item));
+    $('concept-cards').appendChild(card);
+  });
+  $('concepts-section').classList.remove('hidden');
+  $('concepts-section').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function openEditor(item) {
+  currentItem = JSON.parse(JSON.stringify(item));
+  $('editor-title').textContent = item.concept.hook;
+  $('slides-editor').innerHTML = '';
+  item.draft.slides.forEach(slide => {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'slide-edit';
+    wrapper.innerHTML = `
+      <div class="slide-number">${slide.number}</div>
+      <div class="slide-fields">
+        <label>Slide ${slide.number}</label>
+        <textarea data-slide-text="${slide.number}" rows="2">${escapeHtml(slide.text)}</textarea>
+        <details><summary>Background direction</summary><textarea data-slide-visual="${slide.number}" rows="2">${escapeHtml(slide.visual_prompt)}</textarea></details>
+      </div>`;
+    $('slides-editor').appendChild(wrapper);
+  });
+  $('caption').value = item.draft.caption;
+  $('hashtags').value = item.draft.hashtags.join(', ');
+  $('music-mood').value = item.draft.music_mood;
+  $('music-terms').value = item.draft.music_search_terms.join(', ');
+  $('editor-section').classList.remove('hidden');
+  $('editor-section').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function collectDraft() {
+  const draft = JSON.parse(JSON.stringify(currentItem.draft));
+  draft.slides = draft.slides.map(slide => ({
+    ...slide,
+    text: document.querySelector(`[data-slide-text="${slide.number}"]`).value.trim(),
+    visual_prompt: document.querySelector(`[data-slide-visual="${slide.number}"]`).value.trim()
+  }));
+  draft.title = draft.slides[0].text;
+  draft.caption = $('caption').value.trim();
+  draft.hashtags = $('hashtags').value.split(',').map(v => v.trim()).filter(Boolean).map(v => v.startsWith('#') ? v : '#' + v.replace(/^#+/, ''));
+  draft.music_mood = $('music-mood').value.trim();
+  draft.music_search_terms = $('music-terms').value.split(',').map(v => v.trim()).filter(Boolean);
+  return draft;
+}
+
+$('concept-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = $('generate-button');
+  setBusy(button, true, 'Thinking…', 'Generate 3 drafts');
+  $('status-text').textContent = 'Building current context, then generating and independently ranking concepts.';
+  $('result-section').classList.add('hidden');
+  try {
+    const response = await fetch('/concepts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        manual_trends: splitLines($('trends').value),
+        use_web_context: $('web-context').checked,
+        output_post_count: 3,
+        mock: $('mock').checked
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Generation failed');
+    showConcepts(data);
+    $('status-text').textContent = 'Three editable drafts are ready. No images have been generated yet.';
+  } catch (error) {
+    $('status-text').textContent = error.message;
+  } finally {
+    setBusy(button, false, 'Thinking…', 'Generate 3 drafts');
+  }
+});
+
+$('close-editor').addEventListener('click', () => $('editor-section').classList.add('hidden'));
+
+$('render-button').addEventListener('click', async () => {
+  if (!currentBatch || !currentItem) return;
+  const button = $('render-button');
+  setBusy(button, true, 'Generating images…', 'Generate the 6 images');
+  $('render-status').textContent = 'Creating six backgrounds and applying the exact text.';
+  try {
+    const response = await fetch(`/drafts/${encodeURIComponent(currentBatch.batch_id)}/${encodeURIComponent(currentItem.concept.id)}/render`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({draft: collectDraft()})
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Rendering failed');
+    $('result-images').innerHTML = '';
+    data.slide_urls.forEach((url, index) => {
+      const figure = document.createElement('figure');
+      figure.innerHTML = `<img src="${url}" alt="Slide ${index + 1}"><figcaption>${index + 1}/6</figcaption>`;
+      $('result-images').appendChild(figure);
+    });
+    $('result-caption').textContent = data.post.draft.caption + ' ' + data.post.draft.hashtags.join(' ');
+    $('result-music').textContent = data.post.draft.music_mood + ' · ' + data.post.draft.music_search_terms.join(' · ');
+    $('result-section').classList.remove('hidden');
+    $('render-status').textContent = 'Done.';
+    $('result-section').scrollIntoView({behavior:'smooth', block:'start'});
+  } catch (error) {
+    $('render-status').textContent = error.message;
+  } finally {
+    setBusy(button, false, 'Generating images…', 'Generate the 6 images');
+  }
+});
+
+loadRecent();
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+</script>
+</body>
+</html>
